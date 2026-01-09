@@ -10,9 +10,14 @@ dist/
 .env.local
 .env.*.local
 
-# Output
+# Input/Output
+input/*
+!input/.gitkeep
 output/*
 !output/.gitkeep
+
+# Prompt
+_prompt.txt
 
 # IDE
 .vscode/
