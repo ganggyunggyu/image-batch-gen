@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "fs";
 import { basename, extname, join } from "path";
 
 export const INPUT_DIR = "./input";
-const PROMPT_FILENAME = "prompt.txt";
+const PROMPT_FILE = "./_prompt.txt";
 
 export const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
@@ -13,7 +13,7 @@ export interface ImageFile {
   mimeType: string;
 }
 
-export function getMimeType(filePath: string): string {
+export const getMimeType = (filePath: string): string => {
   const ext = extname(filePath).toLowerCase();
   const mimeTypes: Record<string, string> = {
     ".png": "image/png",
@@ -23,21 +23,20 @@ export function getMimeType(filePath: string): string {
     ".gif": "image/gif",
   };
   return mimeTypes[ext] || "image/png";
-}
+};
 
-export function getInputImagePaths(): string[] {
-  return readdirSync(INPUT_DIR)
+export const getInputImagePaths = (): string[] =>
+  readdirSync(INPUT_DIR)
     .filter((file) => IMAGE_EXTENSIONS.includes(extname(file).toLowerCase()))
     .map((file) => join(INPUT_DIR, file));
-}
 
-export function getFirstInputImagePath(): string | null {
+export const getFirstInputImagePath = (): string | null => {
   const [first] = getInputImagePaths();
   return first ?? null;
-}
+};
 
-export function loadImagesFromInput(): ImageFile[] {
-  return getInputImagePaths().map((filePath) => {
+export const loadImagesFromInput = (): ImageFile[] =>
+  getInputImagePaths().map((filePath) => {
     const buffer = readFileSync(filePath);
     return {
       path: filePath,
@@ -46,13 +45,19 @@ export function loadImagesFromInput(): ImageFile[] {
       mimeType: getMimeType(filePath),
     };
   });
-}
 
-export function readPromptFile(): string | null {
-  const promptPath = join(INPUT_DIR, PROMPT_FILENAME);
-  if (!existsSync(promptPath)) {
+export const readPromptFile = (): string | null => {
+  if (!existsSync(PROMPT_FILE)) {
     return null;
   }
 
-  return readFileSync(promptPath, "utf-8").trim();
-}
+  return readFileSync(PROMPT_FILE, "utf-8").trim();
+};
+
+export const getItemName = (fileName: string): string => {
+  const nameWithoutExt = fileName.replace(/\.[^.]+$/, "");
+  return nameWithoutExt.replace(/[-_]/g, " ").trim();
+};
+
+export const buildPromptWithItem = (template: string, itemName: string): string =>
+  template.replace(/\{item\}/g, itemName);

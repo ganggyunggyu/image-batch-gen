@@ -1,4 +1,4 @@
-export function requireApiKey(): string {
+export const requireApiKey = (): string => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     console.error("GEMINI_API_KEY 환경변수가 필요해");
@@ -6,4 +6,4 @@ export function requireApiKey(): string {
   }
 
   return apiKey;
-}
+};
