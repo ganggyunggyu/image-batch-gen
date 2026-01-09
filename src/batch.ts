@@ -1,27 +1,23 @@
 /**
  * Gemini 공식 Batch API를 사용한 이미지 일괄 처리
- *
- * 특징:
- * - 50% 비용 절감
- * - 높은 rate limit
- * - 비동기 처리 (목표 24시간, 보통 더 빠름)
+ * JSONL 파일 업로드 방식
  *
  * @see https://ai.google.dev/gemini-api/docs/batch-api
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { writeFileSync } from "fs";
+import { createWriteStream, writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import "dotenv/config";
 
 import { requireApiKey } from "./shared/env";
-import { loadImagesFromInput, readPromptFile, type ImageFile } from "./shared/input";
+import { loadImagesFromInput, readPromptFile, getItemName, buildPromptWithItem, type ImageFile } from "./shared/input";
 import { OUTPUT_DIR, saveBase64Image } from "./shared/output";
 
 const ai = new GoogleGenAI({ apiKey: requireApiKey() });
 
-// 상태 폴링 간격 (ms)
 const POLL_INTERVAL_MS = 5000;
+const BATCH_FILE = "./batch-requests.jsonl";
 
 type BatchJob = Awaited<ReturnType<typeof ai.batches.get>>;
 
@@ -53,7 +49,22 @@ type ProcessResult = {
   error?: string;
 };
 
-function getPrompt(): string {
+type BatchRequest = {
+  key: string;
+  request: {
+    contents: Array<{
+      parts: Array<
+        | { inlineData: { mimeType: string; data: string } }
+        | { text: string }
+      >;
+    }>;
+    generationConfig: {
+      responseModalities: string[];
+    };
+  };
+};
+
+const getPrompt = (): string => {
   const promptFromFile = readPromptFile();
   if (promptFromFile !== null) {
     return promptFromFile;
@@ -64,63 +75,63 @@ function getPrompt(): string {
     return args.join(" ");
   }
 
-  throw new Error("프롬프트가 필요해. input/prompt.txt 또는 인자로 전달해줘");
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-type InlineRequest = {
-  key: string;
-  request: {
-    contents: Array<{
-      role: "user";
-      parts: Array<
-        | { inlineData: { mimeType: string; data: string } }
-        | { text: string }
-      >;
-    }>;
-    generationConfig: {
-      responseModalities: Array<"TEXT" | "IMAGE">;
-    };
-  };
+  throw new Error("프롬프트가 필요해. _prompt.txt 또는 인자로 전달해줘");
 };
 
-function buildInlineRequests(images: ImageFile[], prompt: string): InlineRequest[] {
-  return images.map((image, index) => ({
-    key: `request-${index}-${image.name}`,
-    request: {
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              inlineData: {
-                mimeType: image.mimeType,
-                data: image.base64,
-              },
-            },
-            { text: prompt },
-          ],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ["TEXT", "IMAGE"],
-      },
-    },
-  }));
-}
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitForCompletion(jobName: string): Promise<BatchJob> {
-  console.log(
-    `\n작업 상태 모니터링 중... (${POLL_INTERVAL_MS / 1000}초 간격)`
-  );
+const buildBatchRequests = (
+  images: ImageFile[],
+  promptTemplate: string
+): BatchRequest[] =>
+  images.map((image, index) => {
+    const itemName = getItemName(image.name);
+    const prompt = buildPromptWithItem(promptTemplate, itemName);
+    return {
+      key: `request-${index}-${image.name}`,
+      request: {
+        contents: [
+          {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: image.mimeType,
+                  data: image.base64,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["TEXT", "IMAGE"],
+        },
+      },
+    };
+  });
+
+const writeBatchFile = (requests: BatchRequest[]): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const writeStream = createWriteStream(BATCH_FILE, { flags: "w" });
+
+    writeStream.on("error", reject);
+    writeStream.on("finish", resolve);
+
+    for (const req of requests) {
+      writeStream.write(JSON.stringify(req) + "\n");
+    }
+
+    writeStream.end();
+  });
+
+const waitForCompletion = async (jobName: string): Promise<BatchJob> => {
+  console.log(`\n작업 상태 모니터링 중... (${POLL_INTERVAL_MS / 1000}초 간격)`);
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const job = await ai.batches.get({ name: jobName });
-    const state = job.state;
+    const { state } = job;
 
     console.log(`  상태: ${state}`);
 
@@ -138,36 +149,38 @@ async function waitForCompletion(jobName: string): Promise<BatchJob> {
 
     await sleep(POLL_INTERVAL_MS);
   }
-}
+};
 
-function getInlineResponses(job: BatchJob): InlineResponseItem[] {
+const getInlineResponses = (job: BatchJob): InlineResponseItem[] => {
   const dest = job.dest as { inlinedResponses?: InlineResponseItem[] } | undefined;
   return dest?.inlinedResponses ?? [];
-}
+};
 
-function findFirstInlineData(parts: InlineDataPart[]): InlineData | null {
+const findFirstInlineData = (parts: InlineDataPart[]): InlineData | null => {
   for (const part of parts) {
     if (part.inlineData) {
       return part.inlineData;
     }
   }
-
   return null;
-}
+};
 
-function saveInlineImage(key: string, inlineData: InlineData): string {
-  return saveBase64Image({
+const extractFileName = (key: string): string => {
+  const parts = key.split("-");
+  return parts.length >= 3 ? parts.slice(2).join("-") : key;
+};
+
+const saveInlineImage = (key: string, inlineData: InlineData): string =>
+  saveBase64Image({
     base64: inlineData.data,
     mimeType: inlineData.mimeType,
-    prefix: key,
+    fileName: extractFileName(key),
   });
-}
 
-async function processResults(job: BatchJob): Promise<ProcessResult[]> {
+const processResults = async (job: BatchJob): Promise<ProcessResult[]> => {
   console.log("\n결과 처리 중...");
 
   const results: ProcessResult[] = [];
-
   const inlinedResponses = getInlineResponses(job);
 
   for (const item of inlinedResponses) {
@@ -193,9 +206,9 @@ async function processResults(job: BatchJob): Promise<ProcessResult[]> {
   }
 
   return results;
-}
+};
 
-async function main(): Promise<void> {
+const main = async (): Promise<void> => {
   const images = loadImagesFromInput();
 
   if (images.length === 0) {
@@ -211,19 +224,32 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`\n=== Gemini Batch API ===`);
+  console.log(`\n=== Gemini Batch API (JSONL) ===`);
   console.log(`이미지 수: ${images.length}`);
-  console.log(`프롬프트: ${prompt}`);
-  console.log(`========================\n`);
+  console.log(`프롬프트 템플릿: ${prompt}`);
+  console.log(`================================\n`);
 
-  const inlineRequests = buildInlineRequests(images, prompt);
+  const batchRequests = buildBatchRequests(images, prompt);
+
+  console.log("JSONL 파일 생성 중...");
+  await writeBatchFile(batchRequests);
+  console.log(`  → ${BATCH_FILE}`);
+
+  console.log("파일 업로드 중...");
+  const uploadedFile = await ai.files.upload({
+    file: BATCH_FILE,
+    config: { mimeType: "application/jsonl" },
+  });
+  console.log(`  → ${uploadedFile.name}`);
 
   console.log("배치 작업 생성 중...");
+  if (!uploadedFile.name) {
+    throw new Error("파일 업로드 실패: name이 없음");
+  }
 
   const batchJob = await ai.batches.create({
-    model: "gemini-2.0-flash-exp",
-    // @ts-expect-error - src 타입이 정확하지 않음
-    src: inlineRequests,
+    model: "gemini-2.0-flash-001",
+    src: uploadedFile.name,
     config: {
       displayName: `image-batch-${Date.now()}`,
     },
@@ -256,6 +282,13 @@ async function main(): Promise<void> {
     )
   );
   console.log(`리포트: ${reportPath}`);
-}
+
+  // 임시 파일 정리
+  try {
+    unlinkSync(BATCH_FILE);
+  } catch {
+    // 파일 삭제 실패해도 무시
+  }
+};
 
 main();

@@ -1,18 +1,26 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { readFileSync } from "fs";
-import "dotenv/config";
+/**
+ * input 폴더의 모든 이미지를 순차 처리
+ * 실시간 API 사용 (rate limit 주의)
+ */
 
-import { requireApiKey } from "./shared/env";
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { readFileSync } from 'fs';
+import { basename } from 'path';
+import 'dotenv/config';
+
+import { requireApiKey } from './shared/env';
 import {
-  getFirstInputImagePath,
+  getInputImagePaths,
   getMimeType,
   readPromptFile,
-} from "./shared/input";
-import { saveBase64Image } from "./shared/output";
+  getItemName,
+  buildPromptWithItem,
+} from './shared/input';
+import { saveBase64Image } from './shared/output';
 
 const genAI = new GoogleGenerativeAI(requireApiKey());
 
-const OUTPUT_PREFIX = "output";
+const DELAY_MS = 5000;
 
 type ResponsePart = {
   inlineData?: {
@@ -22,18 +30,56 @@ type ResponsePart = {
   text?: string;
 };
 
-function createModel() {
-  return genAI.getGenerativeModel({
-    model: "gemini-2.0-flash-exp",
+type ProcessResult = {
+  imagePath: string;
+  success: boolean;
+  outputPath?: string;
+  error?: string;
+};
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+const createModel = () =>
+  genAI.getGenerativeModel({
+    // model: 'gemini-3-pro-image-preview',
+    model: 'gemini-2.5-flash-image',
+    // model: 'gemini-2.0-flash-exp-image-generation',
     generationConfig: {
       // @ts-expect-error - responseModalities는 아직 타입 정의에 없음
-      responseModalities: ["image", "text"],
+      responseModalities: ['image', 'text'],
     },
   });
-}
 
-function processResponseParts(parts: ResponsePart[]): number {
-  let savedCount = 0;
+const generateImage = async (
+  imagePath: string,
+  promptTemplate: string
+): Promise<ProcessResult> => {
+  const imageBuffer = readFileSync(imagePath);
+  const base64Image = imageBuffer.toString('base64');
+  const mimeType = getMimeType(imagePath);
+  const fileName = basename(imagePath);
+  const itemName = getItemName(fileName);
+  const prompt = buildPromptWithItem(promptTemplate, itemName);
+
+  console.log(`  → item: "${itemName}"`);
+  console.log(`  → prompt:\n${prompt}\n`);
+
+  const model = createModel();
+
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType,
+        data: base64Image,
+      },
+    },
+    prompt,
+  ]);
+
+  const response = result.response;
+  const parts = (response.candidates?.[0]?.content?.parts ??
+    []) as ResponsePart[];
 
   for (const part of parts) {
     if (part.inlineData) {
@@ -41,97 +87,90 @@ function processResponseParts(parts: ResponsePart[]): number {
       const outputPath = saveBase64Image({
         base64: data,
         mimeType: responseMimeType,
-        prefix: OUTPUT_PREFIX,
+        fileName: basename(imagePath),
       });
-      console.log(`\n이미지 저장됨: ${outputPath}`);
-      savedCount++;
-    } else if (part.text) {
-      console.log(`\n응답 텍스트: ${part.text}`);
+      return { imagePath, success: true, outputPath };
     }
   }
 
-  return savedCount;
-}
+  return { imagePath, success: false, error: '이미지 생성 안 됨' };
+};
 
-async function generateImage(imagePath: string, prompt: string): Promise<void> {
-  console.log(`\n입력 이미지: ${imagePath}`);
-  console.log(`프롬프트: ${prompt}`);
-
-  const imageBuffer = readFileSync(imagePath);
-  const base64Image = imageBuffer.toString("base64");
-  const mimeType = getMimeType(imagePath);
-
-  const model = createModel();
-
-  try {
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          mimeType,
-          data: base64Image,
-        },
-      },
-      prompt,
-    ]);
-
-    const response = result.response;
-    const parts = (response.candidates?.[0]?.content?.parts ?? []) as ResponsePart[];
-    const savedCount = processResponseParts(parts);
-
-    if (savedCount === 0) {
-      console.log("\n이미지가 생성되지 않았어. 응답을 확인해봐.");
-      console.log(JSON.stringify(response, null, 2));
-    }
-  } catch (error) {
-    console.error("에러 발생:", error);
-    throw error;
+const getPrompt = (): string => {
+  const promptFromFile = readPromptFile();
+  if (promptFromFile !== null) {
+    return promptFromFile;
   }
-}
 
-async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  let imagePath: string | null = null;
-  let prompt = "";
+  if (args.length > 0) {
+    return args.join(' ');
+  }
 
-  if (args.length >= 2) {
-    const [imageArg, ...promptParts] = args;
-    imagePath = imageArg ?? null;
-    prompt = promptParts.join(" ");
-  } else if (args.length === 1) {
-    const [promptArg] = args;
-    imagePath = getFirstInputImagePath();
-    prompt = promptArg ?? "";
-  } else {
-    imagePath = getFirstInputImagePath();
-    let promptFromFile: string | null = null;
+  throw new Error('프롬프트가 필요해. input/prompt.txt 또는 인자로 전달해줘');
+};
+
+const main = async (): Promise<void> => {
+  const imagePaths = getInputImagePaths();
+
+  if (imagePaths.length === 0) {
+    console.error('input 폴더에 이미지가 없어');
+    process.exit(1);
+  }
+
+  let prompt: string;
+  try {
+    prompt = getPrompt();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+
+  console.log(`\n=== 순차 이미지 처리 ===`);
+  console.log(`이미지 수: ${imagePaths.length}`);
+  console.log(`프롬프트 템플릿: ${prompt}`);
+  console.log(`딜레이: ${DELAY_MS}ms`);
+  console.log(`========================\n`);
+
+  const results: ProcessResult[] = [];
+
+  for (let i = 0; i < imagePaths.length; i++) {
+    const imagePath = imagePaths[i];
+    console.log(`[${i + 1}/${imagePaths.length}] ${basename(imagePath)}`);
+
     try {
-      promptFromFile = readPromptFile();
-    } catch {
-      promptFromFile = null;
+      const result = await generateImage(imagePath, prompt);
+      results.push(result);
+
+      if (result.success) {
+        console.log(`  ✓ ${result.outputPath}`);
+      } else {
+        console.log(`  ✗ ${result.error}`);
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      results.push({ imagePath, success: false, error: errorMsg });
+      console.log(`  ✗ 에러: ${errorMsg}`);
     }
 
-    if (promptFromFile === null) {
-      console.error("사용법:");
-      console.error("  npm run single <프롬프트>");
-      console.error("  npm run single <이미지경로> <프롬프트>");
-      console.error("  또는 input/prompt.txt 파일에 프롬프트 작성");
-      process.exit(1);
+    if (i < imagePaths.length - 1) {
+      await sleep(DELAY_MS);
     }
-
-    prompt = promptFromFile;
   }
 
-  if (!imagePath) {
-    console.error("input 폴더에 이미지가 없어");
-    process.exit(1);
-  }
+  const succeeded = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success).length;
 
-  if (!prompt) {
-    console.error("프롬프트가 필요해");
-    process.exit(1);
-  }
+  console.log(`\n=== 결과 ===`);
+  console.log(`성공: ${succeeded}/${results.length}`);
+  console.log(`실패: ${failed}/${results.length}`);
 
-  await generateImage(imagePath, prompt);
-}
+  if (failed > 0) {
+    console.log(`\n실패 목록:`);
+    results
+      .filter((r) => !r.success)
+      .forEach((r) => console.log(`  - ${basename(r.imagePath)}: ${r.error}`));
+  }
+};
 
 main();
