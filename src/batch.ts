@@ -1,46 +1,37 @@
 /**
- * Gemini 공식 Batch API를 사용한 이미지 일괄 처리
- * JSONL 파일 업로드 방식
- *
- * @see https://ai.google.dev/gemini-api/docs/batch-api
+ * Gemini 이미지 생성(응답 모달리티 IMAGE) 멀티 처리
+ * JSONL Batch API 대신 동시 처리 큐 사용
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { createWriteStream, writeFileSync, unlinkSync } from "fs";
+import { writeFileSync } from "fs";
 import { join } from "path";
 import "dotenv/config";
 
 import { requireApiKey } from "./shared/env";
-import { loadImagesFromInput, readPromptFile, getItemName, buildPromptWithItem, type ImageFile } from "./shared/input";
+import {
+  buildPromptWithItem,
+  getItemName,
+  loadImagesFromInput,
+  readPromptFile,
+  type ImageFile,
+} from "./shared/input";
 import { OUTPUT_DIR, saveBase64Image } from "./shared/output";
+import {
+  DEFAULT_IMAGE_MODEL,
+  KNOWN_IMAGE_MODELS,
+  requestImageGeneration,
+} from "./shared/google";
 
 const ai = new GoogleGenAI({ apiKey: requireApiKey() });
 
-const POLL_INTERVAL_MS = 5000;
-const BATCH_FILE = "./batch-requests.jsonl";
-
-type BatchJob = Awaited<ReturnType<typeof ai.batches.get>>;
-
-type InlineData = {
-  data: string;
-  mimeType: string;
-};
-
-type InlineDataPart = {
-  inlineData?: InlineData;
-  text?: string;
-};
-
-type InlineResponseItem = {
-  key?: string;
-  response?: {
-    candidates?: Array<{
-      content?: {
-        parts?: InlineDataPart[];
-      };
-    }>;
-  };
-};
+const IMAGE_MODEL = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
+const ASPECT_RATIO = process.env.IMAGE_ASPECT_RATIO;
+const CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(process.env.IMAGE_BATCH_CONCURRENCY ?? "3", 10)
+);
+const REQUEST_DELAY_MS = Number(process.env.IMAGE_DELAY_MS ?? "0");
 
 type ProcessResult = {
   key: string;
@@ -49,20 +40,8 @@ type ProcessResult = {
   error?: string;
 };
 
-type BatchRequest = {
-  key: string;
-  request: {
-    contents: Array<{
-      parts: Array<
-        | { inlineData: { mimeType: string; data: string } }
-        | { text: string }
-      >;
-    }>;
-    generationConfig: {
-      responseModalities: string[];
-    };
-  };
-};
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 const getPrompt = (): string => {
   const promptFromFile = readPromptFile();
@@ -78,132 +57,71 @@ const getPrompt = (): string => {
   throw new Error("프롬프트가 필요해. _prompt.txt 또는 인자로 전달해줘");
 };
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const processImage = async (
+  image: ImageFile,
+  promptTemplate: string
+): Promise<ProcessResult> => {
+  const itemName = getItemName(image.name);
+  const prompt = buildPromptWithItem(promptTemplate, itemName);
 
-const buildBatchRequests = (
+  console.log(`  → item: "${itemName}"`);
+
+  try {
+    const generated = await requestImageGeneration({
+      ai,
+      model: IMAGE_MODEL,
+      prompt,
+      base64Image: image.base64,
+      mimeType: image.mimeType,
+      aspectRatio: ASPECT_RATIO,
+    });
+
+    const outputPath = saveBase64Image({
+      base64: generated.base64,
+      mimeType: generated.mimeType,
+      fileName: image.name,
+    });
+
+    return { key: image.name, success: true, outputPath };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return { key: image.name, success: false, error: errorMsg };
+  }
+};
+
+const runQueue = async (
   images: ImageFile[],
   promptTemplate: string
-): BatchRequest[] =>
-  images.map((image, index) => {
-    const itemName = getItemName(image.name);
-    const prompt = buildPromptWithItem(promptTemplate, itemName);
-    return {
-      key: `request-${index}-${image.name}`,
-      request: {
-        contents: [
-          {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: image.mimeType,
-                  data: image.base64,
-                },
-              },
-              { text: prompt },
-            ],
-          },
-        ],
-        generationConfig: {
-          responseModalities: ["TEXT", "IMAGE"],
-        },
-      },
-    };
-  });
+): Promise<ProcessResult[]> => {
+  const results: ProcessResult[] = Array(images.length);
+  let cursor = 0;
 
-const writeBatchFile = (requests: BatchRequest[]): Promise<void> =>
-  new Promise((resolve, reject) => {
-    const writeStream = createWriteStream(BATCH_FILE, { flags: "w" });
+  const worker = async (): Promise<void> => {
+    while (cursor < images.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      const image = images[currentIndex];
 
-    writeStream.on("error", reject);
-    writeStream.on("finish", resolve);
+      console.log(
+        `[${currentIndex + 1}/${images.length}] ${image.name} 처리 중...`
+      );
 
-    for (const req of requests) {
-      writeStream.write(JSON.stringify(req) + "\n");
-    }
+      results[currentIndex] = await processImage(image, promptTemplate);
 
-    writeStream.end();
-  });
-
-const waitForCompletion = async (jobName: string): Promise<BatchJob> => {
-  console.log(`\n작업 상태 모니터링 중... (${POLL_INTERVAL_MS / 1000}초 간격)`);
-
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const job = await ai.batches.get({ name: jobName });
-    const { state } = job;
-
-    console.log(`  상태: ${state}`);
-
-    if (state === "JOB_STATE_SUCCEEDED") {
-      return job;
-    }
-
-    if (state === "JOB_STATE_FAILED") {
-      throw new Error("배치 작업 실패");
-    }
-
-    if (state === "JOB_STATE_CANCELLED") {
-      throw new Error("배치 작업 취소됨");
-    }
-
-    await sleep(POLL_INTERVAL_MS);
-  }
-};
-
-const getInlineResponses = (job: BatchJob): InlineResponseItem[] => {
-  const dest = job.dest as { inlinedResponses?: InlineResponseItem[] } | undefined;
-  return dest?.inlinedResponses ?? [];
-};
-
-const findFirstInlineData = (parts: InlineDataPart[]): InlineData | null => {
-  for (const part of parts) {
-    if (part.inlineData) {
-      return part.inlineData;
-    }
-  }
-  return null;
-};
-
-const extractFileName = (key: string): string => {
-  const parts = key.split("-");
-  return parts.length >= 3 ? parts.slice(2).join("-") : key;
-};
-
-const saveInlineImage = (key: string, inlineData: InlineData): string =>
-  saveBase64Image({
-    base64: inlineData.data,
-    mimeType: inlineData.mimeType,
-    fileName: extractFileName(key),
-  });
-
-const processResults = async (job: BatchJob): Promise<ProcessResult[]> => {
-  console.log("\n결과 처리 중...");
-
-  const results: ProcessResult[] = [];
-  const inlinedResponses = getInlineResponses(job);
-
-  for (const item of inlinedResponses) {
-    const key = item.key || "unknown";
-
-    try {
-      const parts = item.response?.candidates?.[0]?.content?.parts ?? [];
-      const inlineData = findFirstInlineData(parts);
-
-      if (inlineData) {
-        const outputPath = saveInlineImage(key, inlineData);
-        results.push({ key, success: true, outputPath });
-        console.log(`  ✓ ${key} → ${outputPath}`);
+      if (results[currentIndex].success) {
+        console.log(`  ✓ ${results[currentIndex].outputPath}`);
       } else {
-        results.push({ key, success: false, error: "이미지 없음" });
-        console.log(`  ✗ ${key}: 이미지가 생성되지 않음`);
+        console.log(`  ✗ ${results[currentIndex].error}`);
       }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      results.push({ key, success: false, error: errorMsg });
-      console.log(`  ✗ ${key}: ${errorMsg}`);
+
+      if (REQUEST_DELAY_MS > 0) {
+        await sleep(REQUEST_DELAY_MS);
+      }
     }
-  }
+  };
+
+  const workers = Array.from({ length: Math.min(CONCURRENCY, images.length) });
+  await Promise.all(workers.map(() => worker()));
 
   return results;
 };
@@ -224,41 +142,21 @@ const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  console.log(`\n=== Gemini Batch API (JSONL) ===`);
+  console.log(`\n=== Gemini 이미지 멀티 처리 ===`);
+  console.log(`모델: ${IMAGE_MODEL}`);
+  console.log(`예시 모델: ${KNOWN_IMAGE_MODELS.join(", ")}`);
+  if (ASPECT_RATIO) {
+    console.log(`이미지 비율: ${ASPECT_RATIO}`);
+  }
+  console.log(`동시 처리: ${CONCURRENCY}`);
+  if (REQUEST_DELAY_MS > 0) {
+    console.log(`요청 딜레이: ${REQUEST_DELAY_MS}ms`);
+  }
   console.log(`이미지 수: ${images.length}`);
   console.log(`프롬프트 템플릿: ${prompt}`);
-  console.log(`================================\n`);
+  console.log(`=======================\n`);
 
-  const batchRequests = buildBatchRequests(images, prompt);
-
-  console.log("JSONL 파일 생성 중...");
-  await writeBatchFile(batchRequests);
-  console.log(`  → ${BATCH_FILE}`);
-
-  console.log("파일 업로드 중...");
-  const uploadedFile = await ai.files.upload({
-    file: BATCH_FILE,
-    config: { mimeType: "application/jsonl" },
-  });
-  console.log(`  → ${uploadedFile.name}`);
-
-  console.log("배치 작업 생성 중...");
-  if (!uploadedFile.name) {
-    throw new Error("파일 업로드 실패: name이 없음");
-  }
-
-  const batchJob = await ai.batches.create({
-    model: "gemini-2.0-flash-001",
-    src: uploadedFile.name,
-    config: {
-      displayName: `image-batch-${Date.now()}`,
-    },
-  });
-
-  console.log(`작업 생성됨: ${batchJob.name}`);
-
-  const completedJob = await waitForCompletion(batchJob.name!);
-  const results = await processResults(completedJob);
+  const results = await runQueue(images, prompt);
 
   const succeeded = results.filter((r) => r.success).length;
   const failed = results.filter((r) => !r.success).length;
@@ -267,12 +165,19 @@ const main = async (): Promise<void> => {
   console.log(`성공: ${succeeded}/${results.length}`);
   console.log(`실패: ${failed}/${results.length}`);
 
+  if (failed > 0) {
+    console.log(`\n실패 목록:`);
+    results
+      .filter((r) => !r.success)
+      .forEach((r) => console.log(`  - ${r.key}: ${r.error}`));
+  }
+
   const reportPath = join(OUTPUT_DIR, `batch_report_${Date.now()}.json`);
   writeFileSync(
     reportPath,
     JSON.stringify(
       {
-        jobName: batchJob.name,
+        model: IMAGE_MODEL,
         prompt,
         imageCount: images.length,
         results,
@@ -282,13 +187,6 @@ const main = async (): Promise<void> => {
     )
   );
   console.log(`리포트: ${reportPath}`);
-
-  // 임시 파일 정리
-  try {
-    unlinkSync(BATCH_FILE);
-  } catch {
-    // 파일 삭제 실패해도 무시
-  }
 };
 
 main();
