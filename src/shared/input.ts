@@ -2,7 +2,17 @@ import { existsSync, readFileSync, readdirSync } from "fs";
 import { basename, extname, join } from "path";
 
 export const INPUT_DIR = "./input";
-const PROMPT_FILE = "./_prompt.txt";
+
+export const PROMPT_VERSION = process.env.PROMPT_VERSION ?? "v1";
+const PROMPT_FILE_BASE = "./_prompt";
+
+const getPromptFilePath = (): string => {
+  const versionedPath = `${PROMPT_FILE_BASE}_${PROMPT_VERSION}.txt`;
+  if (existsSync(versionedPath)) {
+    return versionedPath;
+  }
+  return `${PROMPT_FILE_BASE}.txt`;
+};
 
 export const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
@@ -47,11 +57,13 @@ export const loadImagesFromInput = (): ImageFile[] =>
   });
 
 export const readPromptFile = (): string | null => {
-  if (!existsSync(PROMPT_FILE)) {
+  const promptPath = getPromptFilePath();
+  if (!existsSync(promptPath)) {
     return null;
   }
 
-  return readFileSync(PROMPT_FILE, "utf-8").trim();
+  console.log(`프롬프트 파일: ${promptPath} (PROMPT_VERSION=${PROMPT_VERSION})`);
+  return readFileSync(promptPath, "utf-8").trim();
 };
 
 export const getItemName = (fileName: string): string => {
