@@ -4,16 +4,16 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { readFileSync } from "fs";
-import { basename } from "path";
+// import { readFileSync } from "fs";
+// import { basename } from "path";
 import "dotenv/config";
 
 import { requireApiKey } from "./shared/env";
 import {
-  buildPromptWithItem,
-  getInputImagePaths,
-  getItemName,
-  getMimeType,
+  // buildPromptWithItem,
+  // getInputImagePaths,
+  // getItemName,
+  // getMimeType,
   readPromptFile,
 } from "./shared/input";
 import { saveBase64Image } from "./shared/output";
@@ -21,16 +21,45 @@ import {
   DEFAULT_IMAGE_MODEL,
   KNOWN_IMAGE_MODELS,
   requestImageGeneration,
+  removeWatermark,
 } from "./shared/google";
+import {
+  fillPromptVariables,
+  getTemplateByName,
+  getAvailableTemplates,
+  CATEGORY_TYPE,
+} from "./shared/prompt-variables";
 
 const ai = new GoogleGenAI({ apiKey: requireApiKey() });
 
 const IMAGE_MODEL = process.env.IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
 const ASPECT_RATIO = process.env.IMAGE_ASPECT_RATIO;
 const DELAY_MS = Number(process.env.IMAGE_DELAY_MS ?? "5000");
+const REMOVE_WATERMARK = process.env.REMOVE_WATERMARK === "true";
+
+const parseArgs = (): { count: number; templateName: string | null } => {
+  const args = process.argv.slice(2);
+  let count = 1;
+  let templateName: string | null = null;
+
+  for (const arg of args) {
+    if (/^\d+$/.test(arg)) {
+      count = Number(arg);
+    } else if (getTemplateByName(arg)) {
+      templateName = arg;
+    }
+  }
+
+  return {
+    count: count || Number(process.env.IMAGE_COUNT ?? "1"),
+    templateName,
+  };
+};
+
+const { count: IMAGE_COUNT, templateName: TEMPLATE_NAME } = parseArgs();
 
 type ProcessResult = {
-  imagePath: string;
+  index: number;
   success: boolean;
   outputPath?: string;
   error?: string;
@@ -40,65 +69,64 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 const getPrompt = (): string => {
+  if (TEMPLATE_NAME) {
+    const template = getTemplateByName(TEMPLATE_NAME);
+    if (template) {
+      return template;
+    }
+  }
+
   const promptFromFile = readPromptFile();
   if (promptFromFile !== null) {
     return promptFromFile;
   }
 
-  const args = process.argv.slice(2);
-  if (args.length > 0) {
-    return args.join(" ");
-  }
-
-  throw new Error("프롬프트가 필요해. _prompt.txt 또는 인자로 전달해줘");
+  console.log(`사용 가능한 템플릿: ${getAvailableTemplates().join(", ")}`);
+  throw new Error("프롬프트가 필요해. 템플릿명(mask, pouch) 또는 _prompt.txt 사용");
 };
 
 const generateImage = async (
-  imagePath: string,
-  promptTemplate: string
+  promptTemplate: string,
+  index: number
 ): Promise<ProcessResult> => {
-  const imageBuffer = readFileSync(imagePath);
-  const base64Image = imageBuffer.toString("base64");
-  const mimeType = getMimeType(imagePath);
-  const fileName = basename(imagePath);
-  const itemName = getItemName(fileName);
-  const prompt = buildPromptWithItem(promptTemplate, itemName);
+  const prompt = fillPromptVariables(promptTemplate);
 
-  console.log(`  → item: "${itemName}"`);
   console.log(`  → prompt:\n${prompt}\n`);
 
   try {
-    const generated = await requestImageGeneration({
+    let generated = await requestImageGeneration({
       ai,
       model: IMAGE_MODEL,
       prompt,
-      base64Image,
-      mimeType,
       aspectRatio: ASPECT_RATIO,
     });
+
+    if (REMOVE_WATERMARK) {
+      console.log(`  → 워터마크 제거 중...`);
+      generated = await removeWatermark({
+        ai,
+        model: IMAGE_MODEL,
+        base64Image: generated.base64,
+        mimeType: generated.mimeType,
+      });
+    }
 
     const outputPath = saveBase64Image({
       base64: generated.base64,
       mimeType: generated.mimeType,
-      fileName,
+      category: CATEGORY_TYPE,
+      template: TEMPLATE_NAME ?? "generated",
     });
 
-    return { imagePath, success: true, outputPath };
+    return { index, success: true, outputPath };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 
-    return { imagePath, success: false, error: errorMsg };
+    return { index, success: false, error: errorMsg };
   }
 };
 
 const main = async (): Promise<void> => {
-  const imagePaths = getInputImagePaths();
-
-  if (imagePaths.length === 0) {
-    console.error("input 폴더에 이미지가 없어");
-    process.exit(1);
-  }
-
   let prompt: string;
   try {
     prompt = getPrompt();
@@ -107,24 +135,28 @@ const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  console.log(`\n=== 순차 이미지 처리 ===`);
+  console.log(`\n=== 이미지 생성 ===`);
   console.log(`모델: ${IMAGE_MODEL}`);
   console.log(`예시 모델: ${KNOWN_IMAGE_MODELS.join(", ")}`);
+  console.log(`카테고리: ${CATEGORY_TYPE}`);
+  console.log(`워터마크 제거: ${REMOVE_WATERMARK ? "ON" : "OFF"}`);
   if (ASPECT_RATIO) {
     console.log(`이미지 비율: ${ASPECT_RATIO}`);
   }
-  console.log(`이미지 수: ${imagePaths.length}`);
-  console.log(`프롬프트 템플릿: ${prompt}`);
+  console.log(`생성 수: ${IMAGE_COUNT}`);
+  if (TEMPLATE_NAME) {
+    console.log(`템플릿: ${TEMPLATE_NAME}`);
+  }
+  console.log(`프롬프트: ${prompt.substring(0, 80)}...`);
   console.log(`딜레이: ${DELAY_MS}ms`);
   console.log(`========================\n`);
 
   const results: ProcessResult[] = [];
 
-  for (let i = 0; i < imagePaths.length; i++) {
-    const imagePath = imagePaths[i];
-    console.log(`[${i + 1}/${imagePaths.length}] ${basename(imagePath)}`);
+  for (let i = 1; i <= IMAGE_COUNT; i++) {
+    console.log(`[${i}/${IMAGE_COUNT}] 생성 중...`);
 
-    const result = await generateImage(imagePath, prompt);
+    const result = await generateImage(prompt, i);
     results.push(result);
 
     if (result.success) {
@@ -133,7 +165,7 @@ const main = async (): Promise<void> => {
       console.log(`  ✗ ${result.error}`);
     }
 
-    if (i < imagePaths.length - 1 && DELAY_MS > 0) {
+    if (i < IMAGE_COUNT && DELAY_MS > 0) {
       await sleep(DELAY_MS);
     }
   }
@@ -144,13 +176,6 @@ const main = async (): Promise<void> => {
   console.log(`\n=== 결과 ===`);
   console.log(`성공: ${succeeded}/${results.length}`);
   console.log(`실패: ${failed}/${results.length}`);
-
-  if (failed > 0) {
-    console.log(`\n실패 목록:`);
-    results
-      .filter((r) => !r.success)
-      .forEach((r) => console.log(`  - ${basename(r.imagePath)}: ${r.error}`));
-  }
 };
 
 main();
