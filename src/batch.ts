@@ -79,7 +79,8 @@ const processImage = async (
     const outputPath = saveBase64Image({
       base64: generated.base64,
       mimeType: generated.mimeType,
-      fileName: image.name,
+      category: "batch",
+      template: image.name.replace(/\.[^.]+$/, ""),
     });
 
     return { key: image.name, success: true, outputPath };
