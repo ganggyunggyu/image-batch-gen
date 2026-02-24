@@ -76,6 +76,30 @@ export const MT_CONTENT_TYPE_BEAUTY = [
   'exfoliating pads',
 ];
 
+// ============ ROLL STOCK SPECIFIC VARIABLES ============
+export const ROLL_FOOD_TYPE = [
+  'savory snacks',
+  'fresh bakery items',
+  'instant coffee sachets',
+  'seasoning powder packets',
+  'protein powder sticks',
+  'honey stick packs',
+  'sauce sachets',
+  'drink mix powders',
+  'instant noodle seasonings',
+  'dried fruit snacks',
+  'candy wrappers',
+  'chocolate bar wraps',
+  'tea bag pouches',
+  'vitamin supplement sachets',
+  'energy gel packs',
+  'condiment packets',
+  'sugar and creamer sticks',
+  'instant soup sachets',
+  'spice blend packets',
+  'granola bar wrappers',
+];
+
 export const DESIGN_THEME_AND_GRAPHICS = [
   'minimalist line art with botanical elements',
   'bold geometric patterns with gradient fill',
@@ -778,7 +802,9 @@ export const PROMPT_TEMPLATES: Record<string, string> = {
 
   mt_bag: `Two center-seal gusset bags (M/T style) lying flat side-by-side on a clean white surface, top-down flat lay view. Both top and bottom edges are completely heat-sealed shut (NOT a stand-up pouch). The pouches have a blocky, rectangular shape with sharp 90-degree corners and crisp angular edges (not rounded), filled with contents like a pack of [MT_CONTENT_TYPE]. Rigid box-like structure with flat planes and defined edges. The left pouch shows the Front view with [MT_FRONT_DESIGN], displaying the full design on the flat front panel. The right pouch shows the Back view with [MT_BACK_DESIGN], and a prominent vertical fin seal (T-seal) running down the center, with visible M-fold gussets on the thick sides. Top edge heat-sealed flat, bottom edge heat-sealed flat - both ends are sealed shut with no opening or stand-up gusset. [MT_TEXTURE] finish. all text must be in English only (no Korean, Chinese, or other non-English characters), professional studio lighting, 8k resolution, photorealistic. --no zipper, spout, handle, stand-up pouch, standing bag, bottom gusset, doypack, rounded corners, soft edges, pillow shape`,
 
-  roll_stock: `A collection of industrial packaging film rolls. Multiple rolls of various sizes are stacked and arranged on a clean surface. Each roll is wound tightly onto a cardboard core, displaying repeating printed designs on glossy plastic or metallic foil material. The designs include [DESIGN_THEME_AND_GRAPHICS], [DESIGN_THEME_COLOR] color palette, and other assorted patterns for [PRODUCT_CATEGORY] packaging, showing vibrant colors. all text must be in English only (no Korean, Chinese, or other non-English characters), product name "[PRODUCT_NAME]" visible on prints. Studio lighting highlights the reflective texture of the film curves. 8k resolution, photorealistic. --no finished pouch, bag, zipper, handle, square bag, flat pouch`,
+  roll_stock_food: `High-end photorealistic studio product photo of 5 identical industrial rollstock packaging film rolls arranged in a staggered cluster on a seamless white background. Each roll is clear glossy plastic film tightly wound on a visible brown cardboard core. Material realism: the film substrate itself is transparent clear plastic, and the graphics are ink printed directly onto the transparent film (not an opaque sleeve/label). Printed design (side surface only): a single continuous packaging design for [ROLL_FOOD_TYPE], featuring [DESIGN_THEME_AND_GRAPHICS] in a [DESIGN_THEME_COLOR] color palette, with vibrant food illustrations and the English product name "[PRODUCT_NAME]". Layout constraint: the printed artwork completely covers the entire side surface edge-to-edge (no blank or unprinted areas), as a dense seamless repeating horizontal grid like real rollstock web printing. Transparency constraint: the end faces (top surfaces) are completely unprinted transparent clear film showing only the wound clear layers and the brown cardboard core. Overlap transparency: the overlapping wound film layers and edges remain visibly transparent (clear plastic), with subtle see-through layering where film overlaps. Consistency: every roll is an exact identical duplicate of the same design (same colors, graphics, layout, and text). Professional softbox lighting, crisp reflections, sharp focus, high detail. --no finished pouch, bag, stand-up pouch, zipper, handle, lid, cap, cosmetic, skincare, beauty product, opaque film, frosted film, matte film, printed end face, non-transparent top, vertical label layout, multiple different designs, varied patterns, different colors between rolls, blank side areas, unprinted side areas, non-English text, Korean text, Chinese text, Japanese text, watermark, logo`,
+
+  roll_stock_beauty: `A collection of industrial beauty product packaging film rolls with horizontally printed beauty sachet designs arranged on a clean studio surface. Each roll is tightly wound onto a brown cardboard core. Key Feature 1 (Clear Top): The top surface of each roll clearly shows the transparent film layers, revealing the brown cardboard core underneath. Key Feature 2 (Horizontal Print Grid Layout): The side surface of the rolls displays beauty packaging designs printed in a horizontal grid pattern - each sachet design unit is laid out horizontally across the roll width, repeating in rows as the roll unwinds. IMPORTANT: Every single roll must display exactly the same identical design - same colors, same graphics, same layout, same product name "[PRODUCT_NAME]". All rolls are identical copies of one design. The printed designs include [DESIGN_THEME_AND_GRAPHICS], [DESIGN_THEME_COLOR] color palette, elegant beauty packaging prints for face mask sachets, wet wipe packaging, cosmetic sample pouches, and skincare wrapping. Glossy transparent plastic film texture under professional studio lighting. all text must be in English only (no Korean, Chinese, or other non-English characters). 8k resolution, photorealistic. --no finished pouch, bag, zipper, handle, food, snack, candy, chocolate, lid, cap, cover, opaque roll, solid color roll, multiple different designs, varied patterns, different colors between rolls, different graphics between rolls, opaque film, non-transparent, frosted, matte film, colored film sides, vertical print layout`,
 };
 
 // Unified aliases
@@ -841,12 +867,14 @@ export const TEMPLATE_ALIASES: Record<string, string> = {
   finseal: 'mt_bag',
   seaweed: 'mt_bag',
   wipe: 'mt_bag',
-  // roll_stock (포장 필름 롤)
+  // roll_stock (포장 필름 롤) - 카테고리별 자동 선택
   roll_stock: 'roll_stock',
   roll: 'roll_stock',
   rollstock: 'roll_stock',
   film: 'roll_stock',
   filmroll: 'roll_stock',
+  roll_stock_food: 'roll_stock_food',
+  roll_stock_beauty: 'roll_stock_beauty',
 };
 
 export const getAvailableTemplates = (): string[] =>
@@ -854,7 +882,13 @@ export const getAvailableTemplates = (): string[] =>
 
 export const getTemplateByName = (name: string): string | null => {
   const normalized = name.toLowerCase();
-  const templateKey = TEMPLATE_ALIASES[normalized] ?? normalized;
+  let templateKey = TEMPLATE_ALIASES[normalized] ?? normalized;
+
+  // roll_stock은 카테고리에 따라 자동 선택
+  if (templateKey === 'roll_stock') {
+    templateKey = CATEGORY_TYPE === 'food' ? 'roll_stock_food' : 'roll_stock_beauty';
+  }
+
   return PROMPT_TEMPLATES[templateKey] ?? null;
 };
 
@@ -893,6 +927,7 @@ export const fillPromptVariables = (template: string): string => {
     .replace('[MT_BACK_DESIGN]', mtBackDesign)
     .replace('[MT_CONTENT_TYPE]', mtContentType)
     .replace('[MT_TEXTURE]', getRandomItem(MT_TEXTURE))
+    .replace('[ROLL_FOOD_TYPE]', getRandomItem(ROLL_FOOD_TYPE))
     .replaceAll('[PRODUCT_NAME]', getRandomItem(PRODUCT_NAME_BY_CATEGORY));
 
   if (CATEGORY_TYPE === 'food') {

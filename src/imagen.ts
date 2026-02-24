@@ -57,6 +57,33 @@ type ProcessResult = {
   error?: string;
 };
 
+const parseImagenPrompt = (
+  rawPrompt: string
+): { prompt: string; aspectRatio?: ImagenAspectRatio } => {
+  let prompt = rawPrompt;
+  let aspectRatio: ImagenAspectRatio | undefined;
+
+  const arMatch = prompt.match(/--ar\s*([0-9]+:[0-9]+)/i);
+  if (arMatch) {
+    const candidate = arMatch[1] as ImagenAspectRatio;
+    if (
+      candidate === "1:1" ||
+      candidate === "3:4" ||
+      candidate === "4:3" ||
+      candidate === "9:16" ||
+      candidate === "16:9"
+    ) {
+      aspectRatio = candidate;
+    }
+    prompt = prompt.replace(arMatch[0], "").replace(/\s{2,}/g, " ").trim();
+  }
+
+  return {
+    prompt,
+    ...(aspectRatio ? { aspectRatio } : {}),
+  };
+};
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -82,7 +109,10 @@ const generateImages = async (
   batchIndex: number,
   batchSize: number
 ): Promise<ProcessResult> => {
-  const prompt = fillPromptVariables(promptTemplate);
+  const rawPrompt = fillPromptVariables(promptTemplate);
+  const parsed = parseImagenPrompt(rawPrompt);
+  const prompt = parsed.prompt;
+  const aspectRatio = ASPECT_RATIO ?? parsed.aspectRatio;
 
   console.log(`  → prompt:\n${prompt}\n`);
 
@@ -92,7 +122,7 @@ const generateImages = async (
       model: IMAGEN_MODEL,
       prompt,
       numberOfImages: batchSize,
-      aspectRatio: ASPECT_RATIO,
+      aspectRatio,
       imageSize: IMAGE_SIZE,
     });
 
